@@ -1,0 +1,735 @@
+---
+title: "Rothia from the human nose inhibit Moraxella catarrhalis colonization with a secreted peptidoglycan endopeptidase"
+author: "Reed M. Stubbendieck, Eishika Dissanayake, Peter M. Burnham, Susan E. Zelasko, Mia I. Temkin, Sydney S. Wisdorf, Rose F. Vrtis, James E. Gern, Cameron R. Currie"
+output:
+  html_document:
+      code_download: true
+      toc: true
+      toc_depth: 3
+      toc_float:
+        collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# initialize libraries
+library(Biostrings)
+library(circlize)
+library(cowplot)
+library(ggmsa)
+library(ggpubr)
+library(ggtree)
+library(phyloseq)
+library(RColorBrewer)
+library(readr)
+library(reshape2)
+library(rstatix)
+library(seqmagick)
+library(tidyverse)
+library(vegan)
+
+# source scripts
+source("./scripts/r/rothia_functions.R")
+```
+
+```{r loading data, include=FALSE, echo=FALSE}
+# load in mothur data
+## load the raw out table from mothur
+raw_otu_table <- read_delim("./derivedData/mothur_output/final.an.shared", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+
+## load the taxonomy data from mothur
+raw_taxonomy <- read_delim("./derivedData/mothur_output/final.an.0.03.cons.taxonomy", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+
+## load the alpha diversity metrics from mothur
+mothur_alpha <- read_delim("./derivedData/mothur_output/processed_otu_table.0.03.subsample.groups.summary",
+                           "\t", escape_double = FALSE, trim_ws = TRUE)
+
+# load the amplicon sequencing metadata
+sample_metadata <- read_delim("./rawData/metadata/rhinogen_sample_metadata.tsv", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+
+# load in bioassay data
+
+## bioassay scores
+rothia_inhibition_assays <- read_delim("./rawData/inhibition_assays/rothia_inhibition_assays.tsv", "\t", escape_double = FALSE, trim_ws = TRUE)
+
+## rsm isolate phylogenetic tree
+rsm_tree <- read.tree("./derivedData/phylogenetic_trees/rsm_tree/astral.species_proportional.tre")
+
+# load strain metadata
+rothia_genome_table <- read_csv("./rawData/genomes/rothia_genome_table.csv")
+
+# load pyparanoid output
+## homolog matrix
+rothia_homolog_matrix <- read_delim("./derivedData/pyparanoid_out/homolog_matrix.txt", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+
+## strain, accession, group mapping
+rothia_homolog_groups <- read_delim("./derivedData/pyparanoid_out/rothia_homolog_groups.tsv", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+
+# load signalP output
+signalP_output <- read_delim("./derivedData/signalP_out/output_protein_type.txt", "\t", escape_double = FALSE, trim_ws = TRUE, skip = 1)
+
+# load protein spectrum counts
+rothia_proteomics_output <- read_delim("./derivedData/rothia_proteomics_output.tsv", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+
+# load SagA homolog alignemnt
+aln <- readAAMultipleAlignment("./derivedData/C40_peptidases_aligned_renamed.fasta")
+
+# load cell culture assay data
+cell_culture_results <- read_delim("./rawData/cell_culture_assays/moraxella_CFUe_cell_culture_assay.tsv", "\t", escape_double = FALSE, trim_ws = TRUE)
+
+# load BGC matrix
+rothia_bgc_matrix <- read.table("./derivedData/rothia_bigscape/rothia_bgc_presence-absence_matrix.tsv", row.names = 1)
+
+# set random seed
+set.seed(8675309)
+```
+
+```{r process raw otu table, include=FALSE}
+# subset the otu_table to select columns
+processed_otu_table <- subset(raw_otu_table, select=-c(label, numOtus))
+
+# process the otu_table for further analyses
+processed_otu_table <- processed_otu_table %>%
+  pivot_longer(!Group, names_to="otu", values_to = "value")
+
+# filter out the negative control reads
+processed_otu_table <- processed_otu_table %>%
+  group_by(otu) %>%
+  mutate(corrected_count = value - value[Group == "negative"]) %>%
+  # set negative read counts to 0
+  mutate(corrected_count = ifelse(corrected_count < 0, 0, corrected_count)) %>%
+  # remove the negative control sample from the table
+  filter(!Group == "negative") %>%
+  # remove any OTUs that were only in the negative control
+  filter(sum(corrected_count) >= 1) %>%
+  # filter out low abundant OTUs
+  ungroup() %>%
+  select(Group, otu, corrected_count) %>%
+  group_by(otu) %>%
+  mutate(otu_sum_count = sum(corrected_count)) %>%
+  # only keeps otus that were represented by at least 10 counts
+  filter(otu_sum_count >= 10) %>%
+  ungroup() %>%
+  # convert to relative abundances
+  group_by(Group) %>%
+  mutate(read_sum = sum(corrected_count)) %>%
+  mutate(rel_abund = corrected_count/read_sum) %>%
+  select(Group, otu, rel_abund) %>%
+  pivot_wider(names_from = otu, values_from = rel_abund)
+
+# clean up the otu_matrix
+otu_matrix <- data.matrix(processed_otu_table)
+row.names(otu_matrix) <- processed_otu_table$Group
+otu_matrix <- otu_matrix[,!(colnames(otu_matrix) %in% c("Group"))]
+
+# order the data
+otu_matrix <- otu_matrix[order(row.names(otu_matrix)),]
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(raw_otu_table)
+```
+
+```{r taxa table processing, echo=FALSE, include=FALSE}
+# update the taxonomy table to remove otus that were only in the negative control
+processed_taxonomy <- raw_taxonomy %>%
+  filter(OTU %in% colnames(processed_otu_table))
+
+# clean up the taxonomy table
+tax <- as.data.frame(processed_taxonomy)
+row.names(tax) <- tax$OTU
+tax <- tax[row.names(tax) %in% colnames(otu_matrix),]
+tax <- separate(tax, Taxonomy, into = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain"), sep=";")
+tax <- tax[,-which(names(tax) %in% c("Size", "Strain", "OTU"))]
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(processed_otu_table)
+rm(raw_taxonomy)
+```
+
+```{r alpha and metadata processing, echo=FALSE, include=FALSE}
+# clean up the alpha data
+mothur_alpha <- as.data.frame(mothur_alpha)
+rownames(mothur_alpha) <- mothur_alpha$group
+mothur_alpha <- mothur_alpha[,-which(names(mothur_alpha) %in% c("label", "method", "nseqs", "group"))]
+
+# clean up the metadata
+sample_metadata <- as.data.frame(sample_metadata)
+rownames(sample_metadata) <- sample_metadata$Sample
+sample_metadata <- sample_metadata[order(row.names(sample_metadata)),]
+sample_metadata <- sample_metadata[, c("Status", "coldAUC"), drop=FALSE]
+
+# merge sample metadata with alpha data
+sample_metadata <- merge(sample_metadata, mothur_alpha, by=0)
+rownames(sample_metadata) <- sample_metadata$Row.names
+sample_metadata <- sample_metadata[,-which(names(sample_metadata) %in% c("Row.names"))]
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(mothur_alpha)
+```
+
+```{r alpha diversity t-test, include=FALSE}
+shannon_ttest <- t.test(sample_metadata$shannon~sample_metadata$Status, data=subset(sample_metadata, Status %in% c("healthy", "sick")))
+```
+
+```{r beta diversity, include=FALSE}
+# create a phyloseq object
+OTU_physeq <- otu_table(as.matrix(otu_matrix), taxa_are_rows=FALSE)
+tax_physeq <- tax_table(as.matrix(tax))
+meta_physeq <- sample_data(sample_metadata)
+
+physeq_alpha <- phyloseq(OTU_physeq, tax_physeq, meta_physeq)
+
+# generate NMDS
+## checks if the NMDS has already been run and loads the object if it has, otherwise runs NMDS
+if (file.exists("./derivedData/r_objects/rhinogen_nmds.rds")){
+  rhinogen_nmds <- readRDS("./derivedData/r_objects/rhinogen_nmds.rds")
+} else {
+  # perform NMDS
+  rhinogen_nmds <- ordinate(physeq = physeq_alpha, method = "NMDS", distance = "bray")
+  # save NMDS object to file
+  saveRDS(rhinogen_nmds, "./derivedData/r_objects/rhinogen_nmds.rds")
+}
+
+# run ANOSIM
+## checks if ANOSIM has already been run and loads the object if it has, otherwise runs ANOSIM
+if (file.exists("./derivedData/r_objects/rhinogen_ANOSIM.rds")){
+  ano_rhino <- readRDS("./derivedData/r_objects/rhinogen_ANOSIM.rds")
+} else {
+  # perform ANOSIM
+  ano_rhino <- anosim(otu_matrix, sample_metadata$Status, distance = "bray", permutations = 100000)
+  # save ANOSIM object to file
+  saveRDS(ano_rhino, "./derivedData/r_objects/rhinogen_ANOSIM.rds")
+}
+
+## extract ANOSIM R and P values for Figure 1
+ano_rhino_label1 <- paste("R=", round(ano_rhino$statistic, digits = 2), sep = "")
+ano_rhino_label2 <- paste("P=", round(ano_rhino$signif, digits = 4), sep = "")
+
+# get significance arrows for otus using envfit
+## checks if envfit has already been run and loads the object if it has, otherwise runs envfit
+if (file.exists("./derivedData/r_objects/rhinogen_envfit.rds")) {
+  fit_bc_otu <- readRDS("./derivedData/r_objects/rhinogen_envfit.rds")
+} else {
+  # run envfit
+  fit_bc_otu <- envfit(rhinogen_nmds, otu_matrix, permutations = 100000)
+  # save envfit object to file
+  saveRDS(fit_bc_otu, "./derivedData/r_objects/rhinogen_envfit.rds")
+}
+  
+# pull out vector coordinates for fitted otus
+otu_arrow_coordinates <- as_tibble(fit_bc_otu$vectors$arrows*sqrt(fit_bc_otu$vectors$r), rownames="otu")
+## r2 values
+otu_r2 <- as_tibble(fit_bc_otu$vectors$r, rownames="otu")
+### set column names
+colnames(otu_r2) <- c("otu", "r2")
+## p values
+otu_arrow_pval <- as_tibble(fit_bc_otu$vectors$pvals, rownames="otu")
+### set column names
+colnames(otu_arrow_pval) <- c("otu", "p")
+
+## merge the otu vector R2 and P values into a single data frame
+otu_arrow_full <- left_join(otu_r2, otu_arrow_pval, by="otu")
+
+## generate new object for merging taxa data
+tax_merge <- as_tibble(tax, rownames="otu")
+
+## merge taxa data onto the coordinates, R2, and P values from envfit
+otu_arrow_full <- left_join(otu_arrow_full, tax_merge, by="otu")
+otu_arrow_full <- left_join(otu_arrow_full, otu_arrow_coordinates, by="otu")
+
+# reorder the otu_arrow_full rows
+otu_arrow_full <- otu_arrow_full %>%
+  select(otu, NMDS1, NMDS2, r2, p, Domain, Phylum, Class, Order, Family, Genus, Species)
+
+### filter to otus of interest, corresponding to Moraxella and Rothia
+otu_arrow <- otu_arrow_full %>%
+  filter(otu == "Otu0001" | otu == "Otu0034" | otu == "Otu0039" | otu == "Otu0222")
+
+# get coordinates for ordination
+## generate initial ordination plot
+p <- plot_ordination(
+  physeq = physeq_alpha, 
+  ordination = rhinogen_nmds, 
+  color = "coldAUC"
+  )
+
+## extract the coordinates from the NMDS to allow plotting both points and arrows
+rhinogen_nmds_coordinates <- data.frame(p$data$NMDS1, p$data$NMDS2, p$data$Status, p$data$coldAUC)
+colnames(rhinogen_nmds_coordinates) <- c("NMDS1", "NMDS2", "Status", "coldAUC")
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(meta_physeq)
+rm(p)
+rm(sample_metadata)
+rm(tax)
+rm(otu_arrow_pval)
+rm(OTU_physeq)
+rm(otu_r2)
+rm(tax_physeq)
+```
+
+```{r inhibition assay processing, include=FALSE, echo=FALSE}
+# process inhibition assay data
+rothia_inhibition_assays_processed <- rothia_inhibition_assays %>%
+  # average the inhibition scores across replicates
+  group_by(strain, target) %>%
+  mutate(avg_inhibition_score = mean(inhibition_score)) %>%
+  ungroup() %>%
+  select(strain, target, avg_inhibition_score) %>%
+  distinct()
+
+# define the Gammaproteobacteria order
+gammaproteobacteria_order <- c("M. catarrhalis", "M. ovis", "M. bovoculi", "A. baumannii", "S. marcescens", "K. pneumoniae", "E. coli", "P. aeruginosa")
+rothia_inhibition_assays_processed$target <- factor(rothia_inhibition_assays_processed$target, levels = rev(gammaproteobacteria_order))
+
+# define the Rothia order
+rothia_order <- rsm_tree[["tip.label"]][-length(rsm_tree[["tip.label"]])]
+rothia_inhibition_assays_processed$strain <- factor(rothia_inhibition_assays_processed$strain, levels = rev(rothia_order))
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(gammaproteobacteria_order)
+rm(rothia_order)
+rm(rsm_tree)
+```
+
+```{r BGC matrix processing, include=FALSE, echo=FALSE}
+# perform a hierarchical clustering
+rothia_bgc_hclust <- hclust(dist((rothia_bgc_matrix), method = "euclidean"), method = "ward.D2")
+rothia_bgc_hclust_2 <- hclust(dist(t(rothia_bgc_matrix), method = "euclidean"), method = "ward.D2")
+
+# convert the matrix into tidy format
+rothia_bgc_matrix <- rownames_to_column(rothia_bgc_matrix, "strain")
+
+rothia_bgc_matrix <- rothia_bgc_matrix %>%
+  pivot_longer(!strain, names_to="BGC", values_to = "Presence")
+
+# reorder factor levels for heat map based on hierarchical clustering
+rothia_bgc_matrix$strain <- factor(rothia_bgc_matrix$strain, levels = (rothia_bgc_hclust$labels)[rothia_bgc_hclust$order])
+
+rothia_bgc_matrix$BGC <- factor(rothia_bgc_matrix$BGC, levels = (rothia_bgc_hclust_2$labels)[rothia_bgc_hclust_2$order])
+
+rothia_bgc_matrix$Presence <- factor(rothia_bgc_matrix$Presence, levels = c(0,1))
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(rothia_bgc_hclust)
+rm(rothia_bgc_hclust_2)
+```
+
+```{r signalP processing, include=FALSE, echo=FALSE}
+# remove the "-consensus" from the signalP_output
+signalP_output$`# ID` <- str_replace_all(signalP_output$`# ID`, "-consensus", '')
+
+# process the signalP output to a simpler form
+signalP_output_processed <- signalP_output %>%
+  mutate(ID = `# ID`) %>%
+  mutate(secreted = ifelse(Prediction == "OTHER", "NO", "YES")) %>%
+  # pull out the corresponding score for the prediction
+  mutate(score = ifelse(Prediction == "LIPO(Sec/SPII)", yes = `LIPO(Sec/SPII)`,
+                        ifelse(Prediction == "TAT(Tat/SPI)", yes = `TAT(Tat/SPI)`,
+                               ifelse(Prediction == "SP(Sec/SPI)", yes = `SP(Sec/SPI)`, no = OTHER)))) %>%
+  select(ID, Prediction, secreted, score)
+
+# rename column headers
+colnames(signalP_output_processed) <- c("group", "prediction", "secreted", "score")
+
+# merge signalP predictions onto the homolog groups
+rothia_homolog_groups <- left_join(rothia_homolog_groups, signalP_output_processed, by = "group")
+
+# pull out homolog groups with a secretion signal
+rothia_homolog_groups_secreted <- rothia_homolog_groups %>%
+  filter(secreted == "YES") %>%
+  select(group) %>%
+  distinct()
+```
+
+```{r homolog matrix processing, include=FALSE, echo=FALSE}
+# convert the homolog matrix into a proper presence absence matrix
+## first convert the matrix into tidy format
+rothia_homolog_count_matrix <- rothia_homolog_matrix %>%
+  pivot_longer(!X1, names_to="strain", values_to = "count") %>%
+  mutate(group = X1) %>%
+  select(strain, group, count) %>%
+  # filters to only contain secreted protein groups
+  filter(group %in% rothia_homolog_groups_secreted$group) %>%
+  pivot_wider(names_from = group, values_from = count)
+
+## change first column to row names
+rothia_homolog_count_matrix <- as.matrix(rothia_homolog_count_matrix)
+rothia_homolog_count_matrix <- data.frame(rothia_homolog_count_matrix[,-1], row.names=rothia_homolog_count_matrix[,1])
+
+## change matrix to numeric
+rothia_homolog_count_matrix <- as.matrix(rothia_homolog_count_matrix)
+mode(rothia_homolog_count_matrix) <- "numeric"
+```
+
+```{r secreted homolog nmds, include=FALSE, echo=FALSE}
+# run NMDS
+rothia_homolog_nmds <- metaMDS(rothia_homolog_count_matrix, k=2, trymax = 100, trace = TRUE, weakties = FALSE)
+
+## extract NMDS coordinates
+data_scores_rothia_homolog_nmds <- as.data.frame(scores(rothia_homolog_nmds)$sites)
+data_scores_rothia_homolog_nmds <- tibble::rownames_to_column(data_scores_rothia_homolog_nmds)
+colnames(data_scores_rothia_homolog_nmds) <- c("strain", "NMDS1", "NMDS2")
+
+## add site information to the extracted coordinates
+data_scores_rothia_homolog_nmds <- left_join(data_scores_rothia_homolog_nmds, rothia_genome_table, by = "strain")
+
+# ANOSIM
+## extract metadata for ANOSIM
+
+data_scores_rothia_homolog_meta <- data_scores_rothia_homolog_nmds %>%
+  select(strain, species, inhibitory_status)
+
+## actually run ANOSIM
+rothia_homolog_anosim_species <- anosim(rothia_homolog_count_matrix, data_scores_rothia_homolog_meta$species, distance = "bray", permutations = 100000)
+
+### extract the pertinent information from ANOSIM for generating labels
+ano_rothia_label1 <- paste("R=", round(rothia_homolog_anosim_species$statistic, digits = 2), sep = "")
+ano_rothia_label2 <- paste("P=", round(rothia_homolog_anosim_species$signif, digits = 6), sep = "")
+```
+
+```{r proteomics processing, include=FALSE, echo=FALSE}
+# add strain information to the proteomics output
+rothia_proteomics <- left_join(rothia_proteomics_output, rothia_genome_table, by = "strain")
+
+# add the signalP predictions and PyParanoid homolog groups to the proteomics output
+rothia_proteomics <- left_join(rothia_proteomics, rothia_homolog_groups, by = c("accession", "strain"))
+
+# add relative abundance information to the proteomics output
+rothia_proteomics <- rothia_proteomics %>%
+  # remove the contaminating spectrum counts
+  filter(!is.na(group)) %>%
+  group_by(strain) %>%
+  mutate(total_spectrum_count = sum(spectrum_count)) %>%
+  ungroup() %>%
+  mutate(rel_abundance = spectrum_count/total_spectrum_count) %>%
+  select(strain, genus, species, inhibitory_status, group, accession, protein, molecular_weight, prediction, secreted, score, spectrum_count, rel_abundance)
+```
+
+```{r secreted proteomics nmds, include=FALSE, echo=FALSE}
+# generate matrix for nmds
+rothia_proteomics_matrix <- rothia_proteomics %>%
+  filter(secreted == "YES") %>%
+  select(strain, group, rel_abundance) %>%
+  # some strains possess multiple proteins in the same grouping. The following code combines the relative abundances into a single value.
+  group_by(strain, group) %>%
+  mutate(rel_abundance = sum(rel_abundance)) %>%
+  distinct() %>%
+  pivot_wider(names_from = group, values_from = rel_abundance)
+
+## change first column to row names
+rothia_proteomics_matrix <- as.matrix(rothia_proteomics_matrix)
+rothia_proteomics_matrix <- data.frame(rothia_proteomics_matrix[,-1], row.names=rothia_proteomics_matrix[,1])
+
+## change matrix to numeric
+rothia_proteomics_matrix <- as.matrix(rothia_proteomics_matrix)
+mode(rothia_proteomics_matrix) <- "numeric"
+
+## convert the NAs to 0
+rothia_proteomics_matrix[is.na(rothia_proteomics_matrix)] <- 0
+
+# run NMDS
+rothia_proteomics_nmds <- metaMDS(rothia_proteomics_matrix, k=2, trymax = 100, trace = TRUE, weakties = FALSE)
+
+## extract NMDS coordinates
+data_scores_rothia_proteomics_nmds <- as.data.frame(scores(rothia_proteomics_nmds)$sites)
+data_scores_rothia_proteomics_nmds <- tibble::rownames_to_column(data_scores_rothia_proteomics_nmds)
+colnames(data_scores_rothia_proteomics_nmds) <- c("strain", "NMDS1", "NMDS2")
+
+## add site information to the extracted coordinates
+data_scores_rothia_proteomics_nmds <- left_join(data_scores_rothia_proteomics_nmds, rothia_genome_table, by = "strain")
+
+# ANOSIM
+## extract metadata for ANOSIM
+data_scores_rothia_proteomics_nmds_meta <- data_scores_rothia_proteomics_nmds %>%
+  select(strain, species, inhibitory_status)
+
+## run ANOSIM
+rothia_proteomics_anosim_species <- anosim(rothia_proteomics_matrix, data_scores_rothia_proteomics_nmds_meta$species, distance = "bray", permutations = 100000)
+
+### extract the pertinent information from ANOSIM for generating labels
+ano_rothia_label3 <- paste("R=", round(rothia_proteomics_anosim_species$statistic, digits = 2), sep = "")
+ano_rothia_label4 <- paste("P=", round(rothia_proteomics_anosim_species$signif, digits = 6), sep = "")
+
+# extract environmental vectors based on protein group
+rothia_sec_proteomics_vectors <- get_fit_vectors(rothia_proteomics_nmds, rothia_proteomics_matrix, 100000, "group")
+
+rothia_sec_proteomics_vectors_reduced <- rothia_sec_proteomics_vectors %>%
+  filter(p < 0.05 & r2 > 0.5) %>%
+  filter(NMDS1 > 0.1 & NMDS2 < 0.2)
+```
+
+```{r SagA relative abundance, include=FALSE, echo=FALSE}
+group_00865_relative_abundance <- rothia_proteomics %>%
+  filter(group == "group_00865") %>%
+  mutate(inhibitory_status = case_when(inhibitory_status == 0 ~ "None",
+                                       inhibitory_status == 1 ~ "Partial",
+                                       inhibitory_status == 2 ~ "Full")) %>%
+  mutate(rel_abundance = rel_abundance*100)
+
+group_00865_relative_abundance$inhibitory_status <- factor(group_00865_relative_abundance$inhibitory_status, levels = c("None", "Partial", "Full"))
+```
+
+```{r cell culture assay, include=FALSE, echo=FALSE}
+cell_culture_results_modified <- cell_culture_results %>%
+  mutate(log_CFUe = log10(CFUe))
+
+# modify the order of columns
+cell_culture_results_modified$species <- factor(cell_culture_results_modified$species, levels=c("control", "aeria", "dentocariosa", "mucilaginosa"))
+
+cell_assay_out <- cell_culture_results_modified %>%
+  tukey_hsd(log_CFUe ~ species) %>%
+  add_significance() %>%
+  add_xy_position(x = "species") %>%
+  # filter out ns results
+  filter(!p.adj.signif == "ns") %>%
+  # increase the spacing on the figure
+  mutate(y.position = 1.005*y.position)
+```
+
+# Figures
+
+```{r gg_theme, include=FALSE, echo=FALSE}
+# standard theme for all ggplot objects
+gg_theme <- theme_classic() +
+  theme(axis.text.y = element_text(color = "black"),
+        axis.text.x = element_text(color = "black"),
+        axis.ticks.y = element_line(color = "black", size = 0.25),
+        axis.ticks.x = element_line(color = "black", size = 0.25), 
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 0.25),
+        plot.background = element_blank(),
+        legend.position = "none",
+        legend.title=element_blank(),
+  )
+```
+
+```{r color palettes, include=FALSE, echo=FALSE}
+# set color palettes
+## generate the color scale for the genera of interest in NMDS plot
+genus_colors <- c("#b45f95", "#5FB49C")
+assigned_genera <- c("Moraxella", "Rothia")
+genus.cols.assigned <- setNames(genus_colors, assigned_genera)
+genus_colScale <- scale_color_manual(name = "Genus", values = genus.cols.assigned)
+
+## for Rothia species
+rothia_cols_assigned <- setNames(c("#56b4e9", "#e69f00", "#009e73", "#d55e00", "#0072b2", "#cc79a7", "#000000"),
+                                 c("aeria", "kristinae", "mucilaginosa", "terrae", "nasimurium", "dentocariosa", "control"))
+
+rothia_fill_scale <- scale_fill_manual(name = "Rothia species", values = rothia_cols_assigned, guide=guide_legend(override.aes=list(shape=21)))
+```
+
+# Main Text Figures
+## Figure 1
+
+```{r generate new NMDS, include=FALSE}
+Figure_1 <- ggplot() +
+  geom_point(data = rhinogen_nmds_coordinates, aes(x=NMDS1, y=NMDS2, fill=coldAUC), shape = 21, size=5) +
+  gg_theme +
+  theme(
+        legend.position = "bottom",
+        legend.title = element_text(color = "black"),
+  ) +
+  scale_fill_gradient(low = "#2C7BB6", high = "#D7191C") +
+  coord_fixed(ratio = 1) +
+  labs(fill="Cold Severity") +
+  guides(fill=guide_colorbar(title.position="top", title.hjust = 0.5, raster = FALSE)) +
+  geom_segment(data=otu_arrow, aes(x=0, xend=NMDS1, y=0, yend=NMDS2, color=Genus),
+               arrow = arrow(length = unit(0.2, "cm")), show.legend = TRUE) +
+  genus_colScale +
+  xlim(-1.5, 1)
+
+
+Figure_1 <- Figure_1 + annotate("text", x=max(rhinogen_nmds_coordinates$NMDS1),y=1.1*max(rhinogen_nmds_coordinates$NMDS2),hjust=0.8,
+             label = ano_rhino_label1) +
+  annotate("text", x=max(rhinogen_nmds_coordinates$NMDS1),y=(1*max(rhinogen_nmds_coordinates$NMDS2)),hjust=0.8,
+           label = ano_rhino_label2)
+
+
+ggsave("./figures/Figure_1.pdf", Figure_1, units=c("in"), height=5, width = 6)
+```
+
+```{r}
+Figure_1
+```
+
+## Figure 2
+### Figure 2B
+
+```{r Figure 2B, include=FALSE, echo=FALSE}
+Figure_2B <- ggplot() +
+  geom_tile(data = rothia_inhibition_assays_processed, aes(x = strain, y=target, fill=avg_inhibition_score, color=avg_inhibition_score)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=90),
+        panel.background = element_blank(),
+        legend.position = "none",
+        plot.background=element_blank(),
+        panel.border=element_blank()) +
+  scale_fill_gradient(low = "#FFFFFF", high = "#9262c3")
+
+ggsave("./figures/Figure_2B.pdf", Figure_2B, units = c("in"), height = 3, width = 5)
+```
+
+```{r}
+Figure_2B
+```
+
+## Figure 4
+
+```{r Figure 4A, include=FALSE, echo=FALSE}
+Figure_4_A <- ggplot() +
+  geom_jitter(data = data_scores_rothia_homolog_nmds, aes(x=NMDS1, y=NMDS2, fill=species, shape=inhibitory_status), size=2.5, width = 0.025, height = 0.025) +
+  scale_shape_manual(labels = c("0", "1", "2", "Reference"), values = c(21, 22, 24, 23)) +
+  rothia_fill_scale +
+  gg_theme +
+  theme(legend.position = "none",
+        aspect.ratio = 1,
+        plot.title = element_text(hjust = 0.5)) +
+  theme(plot.margin = unit(c(0,0,0,0), "in"))
+  
+Figure_4_A <- Figure_4_A + annotate("text", x=max(data_scores_rothia_homolog_nmds$NMDS1),y=1.4*max(data_scores_rothia_homolog_nmds$NMDS2),hjust=0.8,
+             label = ano_rothia_label1) +
+  annotate("text", x=max(data_scores_rothia_homolog_nmds$NMDS1),y=(1.1*max(data_scores_rothia_homolog_nmds$NMDS2)),hjust=0.8,
+           label = ano_rothia_label2)
+
+```
+
+```{r Figure 4B, include=FALSE, echo=FALSE}
+Figure_4_B <- ggplot() +
+  geom_point(data = data_scores_rothia_proteomics_nmds, aes(x=NMDS1, y=NMDS2, fill=species, shape=inhibitory_status), col="black", size=2.5) +
+  scale_shape_manual(labels = c("0", "1", "2"), values = c(21, 22, 24)) +
+  gg_theme +
+  theme(legend.position = "none",
+        aspect.ratio = 1,
+        plot.title = element_text(hjust = 0.5)) +
+  theme(plot.margin = unit(c(0,0,0,0), "in")) +
+  rothia_fill_scale +
+  geom_segment(data=rothia_sec_proteomics_vectors_reduced, aes(x=0, xend=NMDS1, y=0, yend=NMDS2), color="black",
+               arrow = arrow(length = unit(0.15, "cm")), show.legend = TRUE)
+
+Figure_4_B <- Figure_4_B + annotate("text", x=max(data_scores_rothia_proteomics_nmds$NMDS1),y=1.1*max(data_scores_rothia_proteomics_nmds$NMDS2),hjust=0.8,
+             label = ano_rothia_label3) +
+  annotate("text", x=max(data_scores_rothia_proteomics_nmds$NMDS1),y=(1*max(data_scores_rothia_proteomics_nmds$NMDS2)),hjust=0.8,
+           label = ano_rothia_label4)
+
+```
+
+```{r Figure 4C, include=FALSE, echo=FALSE}
+Figure_4_C <- ggplot() +
+  geom_point(data = group_00865_relative_abundance, aes(x=species, y=rel_abundance, fill=species, shape=inhibitory_status), col="black", size=2.5) +
+  rothia_fill_scale +
+  stat_summary(data = group_00865_relative_abundance, aes(x=species, y=rel_abundance), fun = "median", fun.min = "median", fun.max= "median", size=0.3, geom = "crossbar", width = 0.4, color = "black", show.legend = FALSE) +
+  scale_shape_manual(labels = c("None", "Partial", "Full"), values = c(21, 22, 24)) +
+  scale_x_discrete(labels = c("*R. aeria*", "*R. dentocariosa*", "*R. mucilaginosa*")) +
+  scale_y_continuous(limits = c(0,5)) +
+  gg_theme +
+  theme(legend.position = "none",
+        aspect.ratio = 1,
+        plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1),
+        plot.margin = unit(c(0,0,0,0), "in")) +
+  labs(
+    y = "SagA Relative Abundance (%)"
+  )
+```
+
+```{r Figure 4, include=FALSE, echo=FALSE}
+# extract a legend that is laid out horizontally
+Figure_4_legend <- get_legend(
+  Figure_4_A + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom"))
+
+# layout the plots
+Figure_4 <- plot_grid(
+  Figure_4_A,
+  Figure_4_B,
+  Figure_4_C,
+  align = 'vh',
+  labels = c("A", "B", "C"),
+  hjust = -1,
+  nrow = 1
+ )
+ 
+Figure_4 <- plot_grid(Figure_4, Figure_4_legend, nrow = 2, rel_heights = c(3, .3))
+
+ggsave("./figures/Figure_4.pdf", Figure_4, units=c("in"), height=6, width = 8)
+```
+
+```{r}
+Figure_4
+```
+
+## Figure 5
+### Figure 5A
+
+```{r Figure 5A, include=FALSE, echo=FALSE}
+Figure_5A <- ggmsa(aln, 
+                   start = 266, 
+                   end = 340, 
+                   color="Chemistry_AA", 
+                   use_dot = FALSE,
+                   seq_name = TRUE,
+                   consensus_views = TRUE,
+                   ref = "Ls_MER0001322",
+                   ) +
+  gg_theme +
+  theme(axis.text.y = element_text(size=7))
+
+ggsave("./figures/Figure_5A.pdf", Figure_5A, units=c("in"), height=4, width=8)
+```
+
+```{r}
+Figure_5A
+```
+
+## Figure 6
+
+```{r Figure 6, include=FALSE, echo=FALSE}
+Figure_6 <- ggplot()+
+  geom_point(data = cell_culture_results_modified, aes(x=species, y=log_CFUe, fill=species), shape=21) +
+  stat_summary(data = cell_culture_results_modified, aes(x=species, y=log_CFUe), fun = "mean", fun.min = "mean", fun.max= "mean", size=0.3, geom = "crossbar", color = "black", width = 0.4, show.legend = FALSE) +
+  scale_x_discrete(labels = c("Uncolonized" ,"*R. aeria*", "*R. dentocariosa*", "*R. mucilaginosa*")) +
+  rothia_fill_scale +
+  gg_theme +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1),
+        aspect.ratio = 1) +
+  ylab(expression(italic("M. catarrhalis")~textstyle(group("(", paste(log[10])~"CFUe/Lysate", ")")))) +
+  stat_pvalue_manual(cell_assay_out)
+
+ggsave("./figures/Figure_6.pdf", Figure_6, units = c("in"), height = 3.6, width = 4)
+```
+
+```{r}
+Figure_6
+```
+
+# Supplementary Figures
+## Figure S2
+### Figure S2A
+```{r FigureS2_A, include=FALSE, echo=FALSE}
+Figure_S2A <- ggplot() +
+  geom_tile(data = rothia_bgc_matrix, aes(x=BGC, y=strain, fill=Presence)) +
+  gg_theme +
+  scale_fill_manual(breaks = c(0, 1), values = c("white", "black")) +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        aspect.ratio=1)
+
+ggsave("./figures/Figure_S2A.pdf", Figure_S2A, units=c("in"), height=6, width = 6)
+```
+
+```{r}
+Figure_S2A
+```
