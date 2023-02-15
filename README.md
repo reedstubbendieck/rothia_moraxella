@@ -1,6 +1,6 @@
 # <i>Rothia</i> from the human nose inhibit <i>Moraxella catarrhalis</i> colonization with a secreted peptidoglycan endopeptidase
 
-Reed M. Stubbendieck<sup>1,2</sup>, Eishika Dissanayake<sup>3</sup>, Peter M. Burnham<sup>1</sup>, Susan E. Zelasko<sup>1,4</sup>, Mia I. Temkin<sup>1</sup>, Sydney S. Wisdorf<sup>3</sup>, Rose F. Vrtis<sup>3</sup>, James E. Gern<sup>3,5</sup>, Cameron R. Currie<sup>1,6,7</sup>
+Reed M. Stubbendieck<sup>1,2</sup>, Eishika Dissanayake<sup>3</sup>, Peter M. Burnham<sup>1</sup>, Susan E. Zelasko<sup>1,4</sup>, Mia I. Temkin<sup>1</sup>, Sydney S. Wisdorf<sup>3</sup>, Rose F. Vrtis<sup>3</sup>, James E. Gern<sup>3,5</sup>, Cameron R. Currie<sup>1,6,7,8</sup>
 
 <sup>1</sup>Department of Bacteriology, University of Wisconsin-Madison, Madison, WI 53706
 <sup>2</sup>Department of Microbiology and Molecular Genetics, Oklahoma State University, Stillwater, OK 74078
@@ -9,10 +9,11 @@ Reed M. Stubbendieck<sup>1,2</sup>, Eishika Dissanayake<sup>3</sup>, Peter M. Bu
 <sup>5</sup>Department of Medicine, University of Wisconsin School of Medicine and Public Health, Madison, WI 53792
 <sup>6</sup>Department of Energy Great Lakes Bioenergy Research Center, University of Wisconsin-Madison, Madison, WI 53706
 <sup>7</sup>Laboratory of Genetics, University of Wisconsin-Madison, Madison, WI 53706
+<sup>8</sup>David Braley Centre for Antibiotic Discovery, Department of Biochemistry and Biomedical Sciences, McMaster University, Hamilton, Ontario, Canada
 
 ## Introduction
 
-This repository contains the code necessary to replicate the results and figures of our study on interactions between the specialized pathogen <i>Moraxella catarrhalis</i> and <i>Rothia</i>.
+This repository contains the code necessary to replicate the results and figures of our study on interactions between the pathobiont <i>Moraxella catarrhalis</i> and <i>Rothia</i>.
 
 ## Datasets
 

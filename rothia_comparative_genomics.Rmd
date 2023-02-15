@@ -56,6 +56,9 @@ sample_metadata <- read_delim("./rawData/metadata/rhinogen_sample_metadata.tsv",
 ## bioassay scores
 rothia_inhibition_assays <- read_delim("./rawData/inhibition_assays/rothia_inhibition_assays.tsv", "\t", escape_double = FALSE, trim_ws = TRUE)
 
+### bioassay scores split by M. catarrhalis strain
+rothia_inhibition_assays_mcat <- read_delim("./rawData/inhibition_assays/rothia_inhibition_assays_mcat.tsv", "\t", escape_double = FALSE, trim_ws = TRUE)
+
 ## rsm isolate phylogenetic tree
 rsm_tree <- read.tree("./derivedData/phylogenetic_trees/rsm_tree/astral.species_proportional.tre")
 
@@ -80,6 +83,11 @@ rothia_proteomics_output <- read_delim("./derivedData/rothia_proteomics_output.t
 
 # load SagA homolog alignemnt
 aln <- readAAMultipleAlignment("./derivedData/C40_peptidases_aligned_renamed.fasta")
+
+# load in the SagA inhibition assay data
+sagA_inhibition <- read_delim("rawData/inhibition_assays/sagA_inhibition.tsv", 
+                              delim = "\t", escape_double = FALSE, 
+                              trim_ws = TRUE)
 
 # load cell culture assay data
 cell_culture_results <- read_delim("./rawData/cell_culture_assays/moraxella_CFUe_cell_culture_assay.tsv", "\t", escape_double = FALSE, trim_ws = TRUE)
@@ -175,7 +183,15 @@ rm(mothur_alpha)
 ```
 
 ```{r alpha diversity t-test, include=FALSE}
-shannon_ttest <- t.test(sample_metadata$shannon~sample_metadata$Status, data=subset(sample_metadata, Status %in% c("healthy", "sick")))
+shannon_wilcox <- wilcox.test(sample_metadata$shannon~sample_metadata$Status, 
+                              data=subset(sample_metadata, Status %in% c("healthy", "sick")), 
+                              alternative = "two.sided", 
+                              mu = 0, 
+                              paired = FALSE, 
+                              exact = NULL, 
+                              correct = TRUE, 
+                              conf.int = FALSE, 
+                              conf.level = 0.95)
 ```
 
 ```{r beta diversity, include=FALSE}
@@ -295,9 +311,24 @@ rothia_inhibition_assays_processed$strain <- factor(rothia_inhibition_assays_pro
 
 # remove intermediary objects that are no longer needed for subsequent analysis or figure generation
 rm(gammaproteobacteria_order)
+```
+
+```{r inhibition assay processing for M. catarrhalis, include=FALSE, echo=FALSE}
+rothia_inhibition_assays_mcat_processed <- rothia_inhibition_assays_mcat %>%
+  # average the inhibition scores across replicates
+  group_by(strain, target) %>%
+  mutate(avg_inhibition_score = mean(inhibition_score)) %>%
+  ungroup() %>%
+  select(strain, target, avg_inhibition_score) %>%
+  distinct()
+
+rothia_inhibition_assays_mcat_processed$strain <- factor(rothia_inhibition_assays_mcat_processed$strain, levels = rev(rothia_order))
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
 rm(rothia_order)
 rm(rsm_tree)
 ```
+
 
 ```{r BGC matrix processing, include=FALSE, echo=FALSE}
 # perform a hierarchical clustering
@@ -477,12 +508,39 @@ group_00865_relative_abundance <- rothia_proteomics %>%
 group_00865_relative_abundance$inhibitory_status <- factor(group_00865_relative_abundance$inhibitory_status, levels = c("None", "Partial", "Full"))
 ```
 
+```{r SagA Inhibition Assay, include=FALSE, echo=FALSE}
+sagA_inhibition_grouped <- sagA_inhibition %>%
+  group_by(treatment, time) %>%
+  summarize(mean_OD600 = mean(OD600),
+            se = sd(OD600)/sqrt(length(OD600)))
+  
+sagA_inhibition_result <- sagA_inhibition %>%
+  group_by(time) %>%
+  wilcox_test(OD600 ~ treatment, paired = FALSE) %>%
+  add_significance() %>%
+  add_xy_position(x = "time") %>%
+  # filter out ns results
+  filter(!p.signif == "ns")
+
+# subset values of time where SagA and Control were different
+subset_df <- subset(sagA_inhibition_grouped, treatment == "Control" & time %in% seq(6, 13, by=1))
+control <- subset_df$mean_OD600*1.05
+
+## change y.position on the sagA_inhibition_result
+sagA_inhibition_result$y.position <- control
+
+# remove intermediary objects that are no longer needed for subsequent analysis or figure generation
+rm(control)
+rm(subset_df)
+```
+
+
 ```{r cell culture assay, include=FALSE, echo=FALSE}
 cell_culture_results_modified <- cell_culture_results %>%
   mutate(log_CFUe = log10(CFUe))
 
 # modify the order of columns
-cell_culture_results_modified$species <- factor(cell_culture_results_modified$species, levels=c("control", "aeria", "dentocariosa", "mucilaginosa"))
+cell_culture_results_modified$species <- factor(cell_culture_results_modified$species, levels=c("control", "aeria", "dentocariosa", "similmucilaginosa"))
 
 cell_assay_out <- cell_culture_results_modified %>%
   tukey_hsd(log_CFUe ~ species) %>%
@@ -525,6 +583,10 @@ rothia_cols_assigned <- setNames(c("#56b4e9", "#e69f00", "#009e73", "#d55e00", "
                                  c("aeria", "kristinae", "mucilaginosa", "terrae", "nasimurium", "dentocariosa", "control"))
 
 rothia_fill_scale <- scale_fill_manual(name = "Rothia species", values = rothia_cols_assigned, guide=guide_legend(override.aes=list(shape=21)))
+
+## for SagA
+sagA_colors <- c("Control" = "#FFB90F", "SagA" = "#333333")
+
 ```
 
 # Main Text Figures
@@ -629,7 +691,7 @@ Figure_4_C <- ggplot() +
   rothia_fill_scale +
   stat_summary(data = group_00865_relative_abundance, aes(x=species, y=rel_abundance), fun = "median", fun.min = "median", fun.max= "median", size=0.3, geom = "crossbar", width = 0.4, color = "black", show.legend = FALSE) +
   scale_shape_manual(labels = c("None", "Partial", "Full"), values = c(21, 22, 24)) +
-  scale_x_discrete(labels = c("*R. aeria*", "*R. dentocariosa*", "*R. mucilaginosa*")) +
+  scale_x_discrete(labels = c("*R. aeria*", "*R. dentocariosa*", "*R. similmucilaginosa*")) +
   scale_y_continuous(limits = c(0,5)) +
   gg_theme +
   theme(legend.position = "none",
@@ -671,7 +733,97 @@ Figure_4
 ```
 
 ## Figure 5
-### Figure 5A
+
+### Figure 5B
+
+```{r Figure 5B, include=FALSE, echo=FALSE}
+Figure_5B <- ggplot() +
+  gg_theme +
+  scale_x_continuous(breaks=seq(1,13, by=2)) +
+  geom_point(data=sagA_inhibition_grouped, aes(x=time, y=mean_OD600, color=treatment)) +
+  geom_line(data=sagA_inhibition_grouped, aes(x=time, y=mean_OD600, color=treatment), size=1) +
+  geom_ribbon(data=sagA_inhibition_grouped, aes(x = time, ymin = mean_OD600 - se, ymax = mean_OD600 + se, fill=treatment), alpha = 0.2) +
+  scale_color_manual(values = sagA_colors) +
+  scale_fill_manual(values = sagA_colors) +
+  theme(legend.position = c(0.095, 0.95),
+        legend.background = element_blank(),
+        legend.title = element_blank(),
+        aspect.ratio = 1) +
+  ylab(expression(italic("M. catarrhalis")~"Growth"~(OD[600]))) +
+  xlab("Time (h)") +
+  stat_pvalue_manual(sagA_inhibition_result, remove.bracket = TRUE, x="time")
+
+ggsave("./figures/Figure_5B.pdf", Figure_5B, units=c("in"), height = 3.6, width = 4)
+```
+
+```{r}
+Figure_5B
+```
+
+## Figure 6
+
+```{r Figure 6, include=FALSE, echo=FALSE}
+Figure_6 <- ggplot()+
+  geom_point(data = cell_culture_results_modified, aes(x=species, y=log_CFUe, fill=species), shape=21) +
+  stat_summary(data = cell_culture_results_modified, aes(x=species, y=log_CFUe), fun = "mean", fun.min = "mean", fun.max= "mean", size=0.3, geom = "crossbar", color = "black", width = 0.4, show.legend = FALSE) +
+  scale_x_discrete(labels = c("Uncolonized" ,"*R. aeria*", "*R. dentocariosa*", "*R. similmucilaginosa*")) +
+  rothia_fill_scale +
+  gg_theme +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1),
+        aspect.ratio = 1) +
+  ylab(expression(italic("M. catarrhalis")~"Load"~textstyle(group("(", paste(log[10])~"CFUe/Lysate", ")")))) +
+  stat_pvalue_manual(cell_assay_out)
+
+ggsave("./figures/Figure_6.pdf", Figure_6, units = c("in"), height = 3.6, width = 4)
+```
+
+```{r}
+Figure_6
+```
+
+# Supplementary Figures
+
+## Figure S1
+
+```{r Figure S1, include=FALSE, echo=FALSE}
+Figure_S1 <- ggplot() +
+  geom_tile(data = rothia_inhibition_assays_mcat_processed, aes(x = strain, y=target, fill=avg_inhibition_score, color=avg_inhibition_score)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=90),
+        panel.background = element_blank(),
+        legend.position = "none",
+        plot.background=element_blank(),
+        panel.border=element_blank()) +
+  scale_fill_gradient(low = "#FFFFFF", high = "#9262c3")
+
+ggsave("./figures/Figure_S1.pdf", Figure_S1, units = c("in"), height = 3, width = 5)
+```
+
+```{r}
+Figure_S1
+```
+
+## Figure S3
+### Figure S3A
+```{r FigureS3_A, include=FALSE, echo=FALSE}
+Figure_S3A <- ggplot() +
+  geom_tile(data = rothia_bgc_matrix, aes(x=BGC, y=strain, fill=Presence)) +
+  gg_theme +
+  scale_fill_manual(breaks = c(0, 1), values = c("white", "black")) +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        aspect.ratio=1)
+
+ggsave("./figures/Figure_S3A.pdf", Figure_S3A, units=c("in"), height=6, width = 6)
+```
+
+```{r}
+Figure_S3A
+```
+
+### Figure S4A
 
 ```{r Figure 5A, include=FALSE, echo=FALSE}
 Figure_5A <- ggmsa(aln, 
@@ -686,50 +838,9 @@ Figure_5A <- ggmsa(aln,
   gg_theme +
   theme(axis.text.y = element_text(size=7))
 
-ggsave("./figures/Figure_5A.pdf", Figure_5A, units=c("in"), height=4, width=8)
+ggsave("./figures/Figure_S4A.pdf", Figure_S4A, units=c("in"), height=4, width=8)
 ```
 
 ```{r}
-Figure_5A
-```
-
-## Figure 6
-
-```{r Figure 6, include=FALSE, echo=FALSE}
-Figure_6 <- ggplot()+
-  geom_point(data = cell_culture_results_modified, aes(x=species, y=log_CFUe, fill=species), shape=21) +
-  stat_summary(data = cell_culture_results_modified, aes(x=species, y=log_CFUe), fun = "mean", fun.min = "mean", fun.max= "mean", size=0.3, geom = "crossbar", color = "black", width = 0.4, show.legend = FALSE) +
-  scale_x_discrete(labels = c("Uncolonized" ,"*R. aeria*", "*R. dentocariosa*", "*R. mucilaginosa*")) +
-  rothia_fill_scale +
-  gg_theme +
-  theme(axis.title.x = element_blank(),
-        axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1),
-        aspect.ratio = 1) +
-  ylab(expression(italic("M. catarrhalis")~textstyle(group("(", paste(log[10])~"CFUe/Lysate", ")")))) +
-  stat_pvalue_manual(cell_assay_out)
-
-ggsave("./figures/Figure_6.pdf", Figure_6, units = c("in"), height = 3.6, width = 4)
-```
-
-```{r}
-Figure_6
-```
-
-# Supplementary Figures
-## Figure S2
-### Figure S2A
-```{r FigureS2_A, include=FALSE, echo=FALSE}
-Figure_S2A <- ggplot() +
-  geom_tile(data = rothia_bgc_matrix, aes(x=BGC, y=strain, fill=Presence)) +
-  gg_theme +
-  scale_fill_manual(breaks = c(0, 1), values = c("white", "black")) +
-  theme(axis.title = element_blank(),
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        aspect.ratio=1)
-
-ggsave("./figures/Figure_S2A.pdf", Figure_S2A, units=c("in"), height=6, width = 6)
-```
-
-```{r}
-Figure_S2A
+Figure_S4A
 ```
